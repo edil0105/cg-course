@@ -2,14 +2,16 @@
 //  КОМПЬЮТЕРЛІК ГРАФИКА — бір файлдық жоба
 //
 //  1-АПТА: терезе, фон анимациясы, пробел->ақ/бастапқы ауыстыру, FPS
-//  2-АПТА: тор (grid) сызу, әр ұяшықты диагональмен бөліп,
-//          жоғарғы үшбұрышты бояу
+//  СЕМИНАР 4: шеңбер бойымен қозғалатын үшбұрыш
+//      - шейдерге uniform vec2 (orxoду) қосу
+//      - uniform орнын кэштеу (локацияны циклден тыс бір рет алу)
+//      - dt есептеу
+//      - циклді "жаңарту" (update) және "сызу" (draw) деп бөлу
 // =====================================================================
 
 #include <glad/gl.h>      // МІНДЕТТІ: glad әрқашан GLFW-дан БҰРЫН
 #include <GLFW/glfw3.h>
 
-#include <vector>
 #include <cmath>
 #include <iostream>
 
@@ -19,23 +21,35 @@
 const int WIDTH  = 1280;
 const int HEIGHT = 720;
 
-const int COLS = 4;   // тор бағандар саны
-const int ROWS = 6;   // тор жолдар саны
-
 // Пробел басылған сайын true/false болып ауысады (1-апта, 3-тапсырма)
 bool whiteBackground = false;
-
-// Пробелдің алдыңғы кадрдағы күйі (басып тұру мен бір рет басуды ажырату үшін)
 bool spaceWasPressed = false;
 
+// -----------------------------------------------------------------
+//  Семинар 4: қозғалыс параметрлері
+// -----------------------------------------------------------------
+float angle       = 0.0f;   // шеңбер бойындағы ағымдағы бұрыш (радиан)
+float orbitRadius = 0.5f;   // шеңбердің радиусы (NDC бойынша)
+float orbitSpeed  = 1.5f;   // бұрыштық жылдамдық (радиан/секунд)
+
+const float MIN_SPEED = 0.1f;
+const float MAX_SPEED = 8.0f;
+
 // ---------------------------------------------------------------------
-//  Шейдерлер (2-апта: тор мен үшбұрыштарды сызу үшін)
+//  Шейдерлер
+//  uOffset — үшбұрыштың орталығын шеңбер бойымен жылжытады
+//  uScale  — пульсация (кішірейіп-үлкейіп тұру)
 // ---------------------------------------------------------------------
 const char* vertexShaderSrc = R"glsl(
 #version 330 core
 layout (location = 0) in vec2 aPos;
+
+uniform vec2  uOffset;
+uniform float uScale;
+
 void main() {
-    gl_Position = vec4(aPos, 0.0, 1.0);
+    vec2 pos = aPos * uScale + uOffset;
+    gl_Position = vec4(pos, 0.0, 1.0);
 }
 )glsl";
 
@@ -57,22 +71,29 @@ void onResize(GLFWwindow*, int width, int height) {
 
 // ---------------------------------------------------------------------
 //  Пернетақтаны тексеру. Әр кадрда шақырылады.
-//  Пробел: бір рет басқанда ғана фон ауысады (basıp тұрғанда емес).
+//  W/S — шеңбер бойындағы жылдамдықты басқарады (dt арқылы, тегіс)
 // ---------------------------------------------------------------------
-void processInput(GLFWwindow* window) {
+void processInput(GLFWwindow* window, float dt) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, true);
     }
 
+    // Пробел: бір рет басқанда ғана фон ауысады
     bool spaceIsPressed = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-
-    // Тек "жаңа басу" сәтінде ауыстырамыз (алдыңғы кадрда басылмаған,
-    // қазір басылған болса)
     if (spaceIsPressed && !spaceWasPressed) {
         whiteBackground = !whiteBackground;
     }
-
     spaceWasPressed = spaceIsPressed;
+
+    // W/S: жылдамдықты dt-мен тегіс өзгерту (мұнда да dt керек!)
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+        orbitSpeed += 2.0f * dt;
+    }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+        orbitSpeed -= 2.0f * dt;
+    }
+    if (orbitSpeed < MIN_SPEED) orbitSpeed = MIN_SPEED;
+    if (orbitSpeed > MAX_SPEED) orbitSpeed = MAX_SPEED;
 }
 
 // ---------------------------------------------------------------------
@@ -131,7 +152,6 @@ int main() {
         return -1;
     }
 
-    // Қандай OpenGL нұсқасы керек екенін айтамыз.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -152,13 +172,12 @@ int main() {
         return -1;
     }
 
-    glfwMakeContextCurrent(window);              // осы терезенің контексі белсенді
+    glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, onResize);
-    glfwSwapInterval(0);                         // VSync өшірулі (1-апта, 4-тапсырма)
+    glfwSwapInterval(0);   // VSync өшірулі — FPS шынайы көрінеді
 
     // -----------------------------------------------------------------
     //  3. GLAD: OpenGL функцияларын жүктеу
-    //     Контекст белсенді болғаннан КЕЙІН ғана. Ретін бұзсаң — бәрі құлайды.
     // -----------------------------------------------------------------
     if (gladLoadGL(glfwGetProcAddress) == 0) {
         std::cerr << "GLAD жүктелмеді\n";
@@ -170,150 +189,123 @@ int main() {
     std::cout << "GPU:    " << glGetString(GL_RENDERER) << "\n";
 
     // -----------------------------------------------------------------
-    //  4. Шейдер бағдарламасы (2-апта)
+    //  4. Шейдер бағдарламасы
     // -----------------------------------------------------------------
     GLuint shaderProgram = createShaderProgram();
-    GLint colorLoc = glGetUniformLocation(shaderProgram, "uColor");
+
+    // Uniform орындарын ЦИКЛДЕН ТЫС, БІР РЕТ алып, кэштеп қоямыз.
+    // Әр кадр сайын glGetUniformLocation шақырудың қажеті жоқ.
+    GLint colorLoc  = glGetUniformLocation(shaderProgram, "uColor");
+    GLint offsetLoc = glGetUniformLocation(shaderProgram, "uOffset");
+    GLint scaleLoc  = glGetUniformLocation(shaderProgram, "uScale");
 
     // -----------------------------------------------------------------
-    //  5. Тор координаттарын есептеу (NDC: -1..1 аралығы)
-    //     Әр ұяшық BL-TR диагоналімен екіге бөлінеді.
-    //     Жоғарғы үшбұрыш: BL -> TL -> TR
+    //  5. Үшбұрыштың локал координаттары (орталығы (0,0))
     // -----------------------------------------------------------------
-    std::vector<float> fillVerts;   // боялатын (жоғарғы) үшбұрыштар
-    std::vector<float> lineVerts;   // тор + диагональ сызықтары
+    float triVerts[] = {
+         0.00f,  0.07f,
+        -0.06f, -0.05f,
+         0.06f, -0.05f,
+    };
 
-    float left = -0.9f, right = 0.9f;
-    float top = 0.9f, bottom = -0.9f;
-
-    float cellW = (right - left) / COLS;
-    float cellH = (top - bottom) / ROWS;
-
-    for (int r = 0; r < ROWS; ++r) {
-        for (int c = 0; c < COLS; ++c) {
-            float x0 = left + c * cellW;
-            float x1 = x0 + cellW;
-            float y1 = top - r * cellH;      // жоғарғы жиек
-            float y0 = y1 - cellH;           // төменгі жиек
-
-            // Бұрыштар: BL, BR, TL, TR
-            float BLx = x0, BLy = y0;
-            float BRx = x1, BRy = y0;
-            float TLx = x0, TLy = y1;
-            float TRx = x1, TRy = y1;
-
-            fillVerts.insert(fillVerts.end(), {
-                BLx, BLy,
-                TLx, TLy,
-                TRx, TRy
-            });
-
-            // Ұяшық контуры (4 қабырға) + диагональ
-            lineVerts.insert(lineVerts.end(), {
-                BLx, BLy,  BRx, BRy,
-                BRx, BRy,  TRx, TRy,
-                TRx, TRy,  TLx, TLy,
-                TLx, TLy,  BLx, BLy,
-                BLx, BLy,  TRx, TRy   // диагональ
-            });
-        }
-    }
-
-    //  6. VAO/VBO-ларды дайындау
-
-    GLuint fillVAO, fillVBO;
-    glGenVertexArrays(1, &fillVAO);
-    glGenBuffers(1, &fillVBO);
-    glBindVertexArray(fillVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, fillVBO);
-    glBufferData(GL_ARRAY_BUFFER, fillVerts.size() * sizeof(float),
-                 fillVerts.data(), GL_STATIC_DRAW);
+    GLuint VAO, VBO;
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(triVerts), triVerts, GL_STATIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-
-    GLuint lineVAO, lineVBO;
-    glGenVertexArrays(1, &lineVAO);
-    glGenBuffers(1, &lineVBO);
-    glBindVertexArray(lineVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
-    glBufferData(GL_ARRAY_BUFFER, lineVerts.size() * sizeof(float),
-                 lineVerts.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-
     glBindVertexArray(0);
 
-    int fillVertexCount = (int)(fillVerts.size() / 2);
-    int lineVertexCount = (int)(lineVerts.size() / 2);
+    // -----------------------------------------------------------------
+    //  6. dt және FPS үшін уақыт айнымалылары
+    // -----------------------------------------------------------------
+    double lastFrame  = glfwGetTime();
+    int    frameCount = 0;
+    double lastFpsTime = lastFrame;
 
-    //  7. Негізгі цикл
-    
-    int frameCount = 0;
-    double lastFpsTime = glfwGetTime();
-
+    // -----------------------------------------------------------------
+    //  7. Негізгі цикл: ЖАҢАРТУ (update) + СЫЗУ (draw) деп бөлінген
+    // -----------------------------------------------------------------
     while (!glfwWindowShouldClose(window)) {
 
-        processInput(window);
+        // --- dt есептеу (3 жол) ---
+        double currentFrame = glfwGetTime();
+        float  dt = (float)(currentFrame - lastFrame);
+        lastFrame = currentFrame;
 
-        // --- Экранды тазалау (1-апта: анимацияланған не ақ фон) ---
+        processInput(window, dt);
+
+        // ===============================================================
+        //  ЖАҢАРТУ (update) — тек сандарды есептейміз, әлі сызбаймыз
+        // ===============================================================
+        angle += orbitSpeed * dt;
+        if (angle > 6.2831853f) angle -= 6.2831853f;   // 2*PI-ден асса, қайта бастау
+
+        float offsetX = std::cos(angle) * orbitRadius;
+        float offsetY = std::sin(angle) * orbitRadius;
+
+        // Пульсация: уақытқа байланысты кішірейіп-үлкейіп тұрады
+        float scale = 1.0f + 0.3f * std::sin((float)currentFrame * 4.0f);
+
+        // ===============================================================
+        //  СЫЗУ (draw) — тек экранға шығарамыз
+        // ===============================================================
         if (whiteBackground) {
             glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
         } else {
-            float t = (float)glfwGetTime();
+            float t = (float)currentFrame;
             float r = (std::sin(t * 3.0f) + 1.0f) * 0.5f * 0.3f;
             float g = (std::sin(t * 2.0f) + 1.0f) * 0.5f * 0.3f;
             glClearColor(r, g, 0.35f, 1.0f);
         }
         glClear(GL_COLOR_BUFFER_BIT);
 
-        // --- Тор мен диагональдарды сызу (2-апта) ---
         glUseProgram(shaderProgram);
-
-        // Жоғарғы үшбұрыштарды бояу (қызғылт-сары түс)
         glUniform3f(colorLoc, 0.95f, 0.55f, 0.15f);
-        glBindVertexArray(fillVAO);
-        glDrawArrays(GL_TRIANGLES, 0, fillVertexCount);
+        glUniform2f(offsetLoc, offsetX, offsetY);
+        glUniform1f(scaleLoc, scale);
 
-        // Тор мен диагональ сызықтары (ақ түс)
-        glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
-        glBindVertexArray(lineVAO);
-        glDrawArrays(GL_LINES, 0, lineVertexCount);
+        glBindVertexArray(VAO);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        // --- FPS есептеу (1-апта, 4-тапсырма) ---
+        // --- FPS есептеу ---
         frameCount++;
-        double now = glfwGetTime();
-        if (now - lastFpsTime >= 1.0) {
-            std::cout << "FPS: " << frameCount << "\n";
+        if (currentFrame - lastFpsTime >= 1.0) {
+            std::cout << "FPS: " << frameCount
+                      << "  | orbitSpeed: " << orbitSpeed << "\n";
             frameCount = 0;
-            lastFpsTime = now;
+            lastFpsTime = currentFrame;
         }
 
-        glfwSwapBuffers(window);   
-        glfwPollEvents();          
+        glfwSwapBuffers(window);
+        glfwPollEvents();
     }
 
+    // -----------------------------------------------------------------
     //  8. Тазалау
-
-    glDeleteVertexArrays(1, &fillVAO);
-    glDeleteBuffers(1, &fillVBO);
-    glDeleteVertexArrays(1, &lineVAO);
-    glDeleteBuffers(1, &lineVBO);
+    // -----------------------------------------------------------------
+    glDeleteVertexArrays(1, &VAO);
+    glDeleteBuffers(1, &VBO);
     glDeleteProgram(shaderProgram);
 
     glfwTerminate();
     return 0;
 }
 
-//  1-АПТА ТАПСЫРМАЛАРЫ (орындалды)
+
 // =====================================================================
-//  1. Терезенің өлшемін 1280x720 ет.                              
-//  2. Фон түсінің өзгеру жылдамдығын арттыр.                       
-//  3. Пробел басылғанда фон ақ/бастапқы арасында ауысады (toggle). 
-//  4. glfwSwapInterval(0) қой да, консольге FPS шығар.             
+//  СЕМИНАР 4 — ТАПСЫРМАЛАР (өзің орында, бұлар код ішінде ӘДЕЙІ
+//  жазылмаған, себебі оларды өзің тексеруің керек)
 // =====================================================================
+//  1. dt-ны уақытша алып тастап (angle += orbitSpeed; деп жазып көр),
+//     нәтижені көршіңнің компьютеріндегімен салыстыр.
+//     Әр компьютерде жылдамдық бірдей бола ма, жоқ па — соны байқа.
 //
-//  2-АПТА ТАПСЫРМАСЫ (орындалды)
-// =====================================================================
-//  Тікбұрышты COLS x ROWS торға бөліп, әр ұяшықты диагональмен
-//  екі үшбұрышқа бөлу және жоғарғы бөлігін бояу.
+//  2. uScale-ды өзің өзгертіп, пульсацияның жиілігі мен амплитудасын
+//     (4.0f және 0.3f сандарын) өзгертіп көр.
+//
+//  3. W/S батырмалары арқылы жылдамдықты басқару дайын — өзің сынап
+//     көр, MIN_SPEED/MAX_SPEED шектерін өзгертіп баптап көр.
 // =====================================================================
