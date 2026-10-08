@@ -1,64 +1,89 @@
 // =====================================================================
 //  КОМПЬЮТЕРЛІК ГРАФИКА — бір файлдық жоба
 //
-//  1-АПТА: терезе, фон анимациясы, пробел->ақ/бастапқы ауыстыру, FPS
-//  СЕМИНАР 4: шеңбер бойымен қозғалатын үшбұрыш
-//      - шейдерге uniform vec2 (orxoду) қосу
-//      - uniform орнын кэштеу (локацияны циклден тыс бір рет алу)
-//      - dt есептеу
-//      - циклді "жаңарту" (update) және "сызу" (draw) деп бөлу
+//  1-АПТА:    терезе, фон анимациясы, пробел -> ақ/бастапқы фон, FPS
+//  СЕМИНАР 4: uniform vec2 (uOffset), dt, шеңбер бойымен қозғалыс,
+//             цикл "жаңарту (update)" және "сызу (draw)" болып бөлінген
+//  5-АПТА:    индекс буфері (EBO), glDrawElements
+//             - базалық:      түрлі-түсті төртбұрыш, 4 вершина + 6 индекс
+//             - 2-тапсырма:   бесбұрыш (5 вершина, 9 индекс)
+//             - 3-тапсырма:   екі объект (бір VAO, екі сызу)
+//
+//  Басқару:
+//      1       — шеңбер бойымен қозғалатын төртбұрыш (базалық бөлім)
+//      2       — екі төртбұрыш (3-тапсырма)
+//      3       — бесбұрыш (2-тапсырма)
+//      TAB     — wireframe режимін қосу/өшіру (қосымша)
+//      W / S   — айналу жылдамдығын арттыру / азайту
+//      ПРОБЕЛ  — фонды ақ/бастапқы арасында ауыстыру
+//      ESC     — шығу
 // =====================================================================
 
 #include <glad/gl.h>      // МІНДЕТТІ: glad әрқашан GLFW-дан БҰРЫН
 #include <GLFW/glfw3.h>
 
 #include <cmath>
+#include <cstddef>
 #include <iostream>
 
 // ---------------------------------------------------------------------
 //  Баптаулар
 // ---------------------------------------------------------------------
-const int WIDTH  = 1280;
-const int HEIGHT = 720;
+const int   WIDTH  = 1280;
+const int   HEIGHT = 720;
+const float PI     = 3.14159265f;
 
-// Пробел басылған сайын true/false болып ауысады (1-апта, 3-тапсырма)
+// Пробел басылған сайын true/false болып ауысады (1-апта)
 bool whiteBackground = false;
 bool spaceWasPressed = false;
 
-// -----------------------------------------------------------------
-//  Семинар 4: қозғалыс параметрлері
-// -----------------------------------------------------------------
-float angle       = 0.0f;   // шеңбер бойындағы ағымдағы бұрыш (радиан)
-float orbitRadius = 0.5f;   // шеңбердің радиусы (NDC бойынша)
-float orbitSpeed  = 1.5f;   // бұрыштық жылдамдық (радиан/секунд)
+// TAB: wireframe режимі (қосымша тапсырма)
+bool wireframe       = false;
+bool tabWasPressed   = false;
+
+// Қазіргі сахна: 1 — орбитадағы төртбұрыш, 2 — екі төртбұрыш, 3 — бесбұрыш
+int sceneMode = 1;
+
+// Орбита параметрлері (4-семинар)
+float angle       = 0.0f;   // шеңбер бойындағы бұрыш (радиан)
+float orbitRadius = 0.5f;   // 0.5 + 0.3 < 1.0 — фигура NDC-ден шықпайды
+float orbitSpeed  = 1.5f;   // радиан/секунд
 
 const float MIN_SPEED = 0.1f;
 const float MAX_SPEED = 8.0f;
 
 // ---------------------------------------------------------------------
 //  Шейдерлер
-//  uOffset — үшбұрыштың орталығын шеңбер бойымен жылжытады
-//  uScale  — пульсация (кішірейіп-үлкейіп тұру)
+//  Енді вершина өз түсін өзі алып жүреді (location 1), сондықтан
+//  uColor uniform-ы керек емес. uOffset мен uScale — 4-аптадан.
 // ---------------------------------------------------------------------
 const char* vertexShaderSrc = R"glsl(
 #version 330 core
-layout (location = 0) in vec2 aPos;
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aColor;
 
 uniform vec2  uOffset;
 uniform float uScale;
 
+out vec3 vColor;
+
 void main() {
-    vec2 pos = aPos * uScale + uOffset;
-    gl_Position = vec4(pos, 0.0, 1.0);
+    vec3 pos = aPos * uScale;
+    gl_Position = vec4(pos.xy + uOffset, pos.z, 1.0);
+    vColor = aColor;
 }
 )glsl";
 
 const char* fragmentShaderSrc = R"glsl(
 #version 330 core
+in vec3 vColor;
 out vec4 FragColor;
-uniform vec3 uColor;
+
 void main() {
-    FragColor = vec4(uColor, 1.0);
+    FragColor = vec4(vColor, 1.0);
+    // ҚЫЗЫЛ ТЕСТ: ештеңе көрінбесе, жоғарыдағы жолды өшіріп,
+    // төмендегіні қос. Экран қызыл болмаса — мәселе буферде/индексте.
+    // FragColor = vec4(1.0, 0.0, 0.0, 1.0);
 }
 )glsl";
 
@@ -71,27 +96,39 @@ void onResize(GLFWwindow*, int width, int height) {
 
 // ---------------------------------------------------------------------
 //  Пернетақтаны тексеру. Әр кадрда шақырылады.
-//  W/S — шеңбер бойындағы жылдамдықты басқарады (dt арқылы, тегіс)
 // ---------------------------------------------------------------------
 void processInput(GLFWwindow* window, float dt) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, true);
     }
 
-    // Пробел: бір рет басқанда ғана фон ауысады
+    // Пробел: бір рет басқанда фон ауысады
     bool spaceIsPressed = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
     if (spaceIsPressed && !spaceWasPressed) {
         whiteBackground = !whiteBackground;
     }
     spaceWasPressed = spaceIsPressed;
 
-    // W/S: жылдамдықты dt-мен тегіс өзгерту (мұнда да dt керек!)
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
-        orbitSpeed += 2.0f * dt;
+    // TAB: wireframe қосу/өшіру
+    bool tabIsPressed = (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
+    if (tabIsPressed && !tabWasPressed) {
+        wireframe = !wireframe;
     }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
-        orbitSpeed -= 2.0f * dt;
+    tabWasPressed = tabIsPressed;
+
+    // 1 / 2 / 3: сахна таңдау
+    int newMode = sceneMode;
+    if (glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS) newMode = 1;
+    if (glfwGetKey(window, GLFW_KEY_2) == GLFW_PRESS) newMode = 2;
+    if (glfwGetKey(window, GLFW_KEY_3) == GLFW_PRESS) newMode = 3;
+    if (newMode != sceneMode) {
+        sceneMode = newMode;
+        std::cout << "Сахна: " << sceneMode << "\n";
     }
+
+    // W/S: орбита жылдамдығы (dt арқылы тегіс өзгереді)
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) orbitSpeed += 2.0f * dt;
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) orbitSpeed -= 2.0f * dt;
     if (orbitSpeed < MIN_SPEED) orbitSpeed = MIN_SPEED;
     if (orbitSpeed > MAX_SPEED) orbitSpeed = MAX_SPEED;
 }
@@ -137,6 +174,46 @@ GLuint createShaderProgram() {
     glDeleteShader(vs);
     glDeleteShader(fs);
     return program;
+}
+
+// ---------------------------------------------------------------------
+//  VAO + VBO + EBO жасау.
+//  Вершина форматы: 6 float = xyz (орны) + rgb (түсі), stride = 6 * float.
+//
+//  Реті маңызды (үш тұзақ осы жерде):
+//    1) VAO ӘУЕЛІ байланады (glBindVertexArray)
+//    2) EBO (GL_ELEMENT_ARRAY_BUFFER) VAO байланған кезде жасалады —
+//       сонда VAO индекс буферін "есіне сақтайды"
+//    3) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0) ЖАЗЫЛМАЙДЫ — VAO әлі
+//       байланған кезде жазсақ, EBO VAO-дан өшіп қалады
+// ---------------------------------------------------------------------
+void createIndexedMesh(const float* vertices, std::size_t vertexBytes,
+                       const unsigned int* indices, std::size_t indexBytes,
+                       GLuint& vao, GLuint& vbo, GLuint& ebo) {
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+
+    glBindVertexArray(vao);                                   // 1) VAO байлау
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);                       // вершина деректері
+    glBufferData(GL_ARRAY_BUFFER, vertexBytes, vertices, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);               // 2) EBO — VAO байулы кезде
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexBytes, indices, GL_STATIC_DRAW);
+
+    // location 0: орны (xyz)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                          6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    // location 1: түсі (rgb), 3 float кейін басталады
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+                          6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+    // 3) мұнда glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0) ЖОҚ — әдейі
 }
 
 // =====================================================================
@@ -187,50 +264,86 @@ int main() {
 
     std::cout << "OpenGL: " << glGetString(GL_VERSION) << "\n";
     std::cout << "GPU:    " << glGetString(GL_RENDERER) << "\n";
+    std::cout << "1 / 2 / 3 — сахна, TAB — wireframe, W/S — жылдамдық\n";
 
     // -----------------------------------------------------------------
-    //  4. Шейдер бағдарламасы
+    //  4. Шейдер бағдарламасы + uniform орындарын кэштеу
     // -----------------------------------------------------------------
     GLuint shaderProgram = createShaderProgram();
-
-    // Uniform орындарын ЦИКЛДЕН ТЫС, БІР РЕТ алып, кэштеп қоямыз.
-    // Әр кадр сайын glGetUniformLocation шақырудың қажеті жоқ.
-    GLint colorLoc  = glGetUniformLocation(shaderProgram, "uColor");
-    GLint offsetLoc = glGetUniformLocation(shaderProgram, "uOffset");
-    GLint scaleLoc  = glGetUniformLocation(shaderProgram, "uScale");
+    GLint  locOffset = glGetUniformLocation(shaderProgram, "uOffset");
+    GLint  locScale  = glGetUniformLocation(shaderProgram, "uScale");
 
     // -----------------------------------------------------------------
-    //  5. Үшбұрыштың локал координаттары (орталығы (0,0))
+    //  5. БАЗАЛЫҚ БӨЛІМ: төртбұрыш — 4 вершина (6 емес!) + 6 индекс
     // -----------------------------------------------------------------
-    float triVerts[] = {
-         0.00f,  0.07f,
-        -0.06f, -0.05f,
-         0.06f, -0.05f,
+    // 1) Вершина деректері: орны (xyz) + түсі (rgb)
+    float vertices[] = {
+         0.3f,  0.3f, 0.0f,   1.0f, 0.0f, 0.0f,   // 0 — оң жоғарғы
+         0.3f, -0.3f, 0.0f,   0.0f, 1.0f, 0.0f,   // 1 — оң төменгі
+        -0.3f, -0.3f, 0.0f,   0.0f, 0.0f, 1.0f,   // 2 — сол төменгі
+        -0.3f,  0.3f, 0.0f,   1.0f, 1.0f, 0.0f    // 3 — сол жоғарғы
     };
 
-    GLuint VAO, VBO;
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(triVerts), triVerts, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
+    // 2) Индекс массиві: 2 үшбұрыш = 6 индекс (вершина нөмірі 0..3 ғана)
+    unsigned int indices[] = {
+        0, 1, 3,
+        1, 2, 3
+    };
+
+    // 3) VAO + VBO + EBO (EBO VAO байулы кезде жасалады — функция ішінде)
+    GLuint vao, vbo, ebo;
+    createIndexedMesh(vertices, sizeof(vertices),
+                      indices,  sizeof(indices),
+                      vao, vbo, ebo);
 
     // -----------------------------------------------------------------
-    //  6. dt және FPS үшін уақыт айнымалылары
+    //  6. 2-ТАПСЫРМА: бесбұрыш — 5 вершина, 3 үшбұрыш, 9 индекс
+    //     Бұрыштар: -90°, -18°, 54°, 126°, 198° (әрқайсысы +72°)
+    //     0-вершина — барлық үшбұрышта қайталанатын "орталық" нүкте
     // -----------------------------------------------------------------
-    double lastFrame  = glfwGetTime();
-    int    frameCount = 0;
+    const float pentColors[5][3] = {
+        {1.0f, 0.0f, 0.0f},   // 0 — қызыл
+        {1.0f, 0.5f, 0.0f},   // 1 — сарғыш
+        {0.0f, 1.0f, 0.0f},   // 2 — жасыл
+        {0.0f, 0.5f, 1.0f},   // 3 — көк
+        {0.8f, 0.0f, 1.0f}    // 4 — күлгін
+    };
+
+    float pentVertices[5 * 6];
+    for (int i = 0; i < 5; ++i) {
+        float a = (-90.0f + 72.0f * i) * PI / 180.0f;
+        pentVertices[i * 6 + 0] = std::cos(a) * 0.3f;   // x
+        pentVertices[i * 6 + 1] = std::sin(a) * 0.3f;   // y
+        pentVertices[i * 6 + 2] = 0.0f;                 // z
+        pentVertices[i * 6 + 3] = pentColors[i][0];     // r
+        pentVertices[i * 6 + 4] = pentColors[i][1];     // g
+        pentVertices[i * 6 + 5] = pentColors[i][2];     // b
+    }
+
+    unsigned int pentIndices[] = {
+        0, 1, 2,
+        0, 2, 3,
+        0, 3, 4
+    };
+
+    GLuint pentVAO, pentVBO, pentEBO;
+    createIndexedMesh(pentVertices, sizeof(pentVertices),
+                      pentIndices,  sizeof(pentIndices),
+                      pentVAO, pentVBO, pentEBO);
+
+    // -----------------------------------------------------------------
+    //  7. dt және FPS үшін уақыт айнымалылары
+    // -----------------------------------------------------------------
+    double lastFrame   = glfwGetTime();
+    int    frameCount  = 0;
     double lastFpsTime = lastFrame;
 
     // -----------------------------------------------------------------
-    //  7. Негізгі цикл: ЖАҢАРТУ (update) + СЫЗУ (draw) деп бөлінген
+    //  8. Негізгі цикл: ЖАҢАРТУ (update) + СЫЗУ (draw)
     // -----------------------------------------------------------------
     while (!glfwWindowShouldClose(window)) {
 
-        // --- dt есептеу (3 жол) ---
+        // --- dt есептеу ---
         double currentFrame = glfwGetTime();
         float  dt = (float)(currentFrame - lastFrame);
         lastFrame = currentFrame;
@@ -238,19 +351,19 @@ int main() {
         processInput(window, dt);
 
         // ===============================================================
-        //  ЖАҢАРТУ (update) — тек сандарды есептейміз, әлі сызбаймыз
+        //  ЖАҢАРТУ (update) — тек сандарды есептейміз
         // ===============================================================
         angle += orbitSpeed * dt;
-        if (angle > 6.2831853f) angle -= 6.2831853f;   // 2*PI-ден асса, қайта бастау
+        if (angle > 2.0f * PI) angle -= 2.0f * PI;
 
         float offsetX = std::cos(angle) * orbitRadius;
         float offsetY = std::sin(angle) * orbitRadius;
 
-        // Пульсация: уақытқа байланысты кішірейіп-үлкейіп тұрады
+        // Пульсация тек 1-сахнада (2-сахнада екі төртбұрыш тимеуі керек)
         float scale = 1.0f + 0.3f * std::sin((float)currentFrame * 4.0f);
 
         // ===============================================================
-        //  СЫЗУ (draw) — тек экранға шығарамыз
+        //  СЫЗУ (draw)
         // ===============================================================
         if (whiteBackground) {
             glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -262,18 +375,41 @@ int main() {
         }
         glClear(GL_COLOR_BUFFER_BIT);
 
+        glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
         glUseProgram(shaderProgram);
-        glUniform3f(colorLoc, 0.95f, 0.55f, 0.15f);
-        glUniform2f(offsetLoc, offsetX, offsetY);
-        glUniform1f(scaleLoc, scale);
 
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (sceneMode == 1) {
+            // --- Базалық: орбитадағы төртбұрыш ---
+            glBindVertexArray(vao);
+            glUniform2f(locOffset, offsetX, offsetY);
+            glUniform1f(locScale, scale);
+            // 2-параметр — ИНДЕКС саны (6), вершина саны (4) емес!
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)0);
+
+        } else if (sceneMode == 2) {
+            // --- 3-тапсырма: бір VAO, екі uniform + екі сызу ---
+            glBindVertexArray(vao);
+            glUniform1f(locScale, 1.0f);
+
+            glUniform2f(locOffset, -0.4f, 0.0f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)0);
+
+            glUniform2f(locOffset, 0.4f, 0.0f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)0);
+
+        } else {
+            // --- 2-тапсырма: бесбұрыш (9 индекс) ---
+            glBindVertexArray(pentVAO);
+            glUniform1f(locScale, 1.0f);
+            glUniform2f(locOffset, 0.0f, 0.0f);
+            glDrawElements(GL_TRIANGLES, 9, GL_UNSIGNED_INT, (void*)0);
+        }
 
         // --- FPS есептеу ---
         frameCount++;
         if (currentFrame - lastFpsTime >= 1.0) {
             std::cout << "FPS: " << frameCount
+                      << "  | сахна: " << sceneMode
                       << "  | orbitSpeed: " << orbitSpeed << "\n";
             frameCount = 0;
             lastFpsTime = currentFrame;
@@ -284,10 +420,16 @@ int main() {
     }
 
     // -----------------------------------------------------------------
-    //  8. Тазалау
+    //  9. Тазалау
     // -----------------------------------------------------------------
-    glDeleteVertexArrays(1, &VAO);
-    glDeleteBuffers(1, &VBO);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ebo);
+
+    glDeleteVertexArrays(1, &pentVAO);
+    glDeleteBuffers(1, &pentVBO);
+    glDeleteBuffers(1, &pentEBO);
+
     glDeleteProgram(shaderProgram);
 
     glfwTerminate();
@@ -296,16 +438,13 @@ int main() {
 
 
 // =====================================================================
-//  СЕМИНАР 4 — ТАПСЫРМАЛАР (өзің орында, бұлар код ішінде ӘДЕЙІ
-//  жазылмаған, себебі оларды өзің тексеруің керек)
+//  5-АПТА — 1-ТАПСЫРМА (индекстерді бұзу): ӨЗІҢ орында
 // =====================================================================
-//  1. dt-ны уақытша алып тастап (angle += orbitSpeed; деп жазып көр),
-//     нәтижені көршіңнің компьютеріндегімен салыстыр.
-//     Әр компьютерде жылдамдық бірдей бола ма, жоқ па — соны байқа.
+//  indices массивін { 0, 1, 2 } деп өзгерт, ал 1-сахнадағы
+//  glDrawElements-тің екінші параметрін 6 емес, 3 ет.
+//  Бір ғана үшбұрыш көрінуі керек. Тексергеннен кейін ҚАЙТАР:
+//      indices = { 0, 1, 3,  1, 2, 3 },  параметр = 6.
 //
-//  2. uScale-ды өзің өзгертіп, пульсацияның жиілігі мен амплитудасын
-//     (4.0f және 0.3f сандарын) өзгертіп көр.
-//
-//  3. W/S батырмалары арқылы жылдамдықты басқару дайын — өзің сынап
-//     көр, MIN_SPEED/MAX_SPEED шектерін өзгертіп баптап көр.
+//  Қорғауда сұралады: қай үшбұрыш жоғалды? Неге дәл сол? Индекс
+//  массивін өзгерткенде вершина деректері өзгерді ме?
 // =====================================================================
